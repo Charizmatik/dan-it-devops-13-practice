@@ -1,0 +1,210 @@
+=== 1. GET усіх студентів ===
+GET http://127.0.0.1:5000/students
+  status: 200
+[
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 2,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 3,
+    "last_name": "Шевченко"
+  }
+]
+
+
+=== 2. POST три студенти ===
+POST http://127.0.0.1:5000/students
+  body: {"first_name": "Олена", "last_name": "Коваленко", "age": 20}
+  status: 201
+{
+  "age": 20,
+  "first_name": "Олена",
+  "id": 4,
+  "last_name": "Коваленко"
+}
+
+POST http://127.0.0.1:5000/students
+  body: {"first_name": "Ігор", "last_name": "Бондар", "age": 22}
+  status: 201
+{
+  "age": 22,
+  "first_name": "Ігор",
+  "id": 5,
+  "last_name": "Бондар"
+}
+
+POST http://127.0.0.1:5000/students
+  body: {"first_name": "Марія", "last_name": "Шевченко", "age": 19}
+  status: 201
+{
+  "age": 19,
+  "first_name": "Марія",
+  "id": 6,
+  "last_name": "Шевченко"
+}
+
+
+=== 3. GET усіх після створення ===
+GET http://127.0.0.1:5000/students
+  status: 200
+[
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 2,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 3,
+    "last_name": "Шевченко"
+  },
+  {
+    "age": 20,
+    "first_name": "Олена",
+    "id": 4,
+    "last_name": "Коваленко"
+  },
+  {
+    "age": 22,
+    "first_name": "Ігор",
+    "id": 5,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 19,
+    "first_name": "Марія",
+    "id": 6,
+    "last_name": "Шевченко"
+  }
+]
+
+
+=== 4. PATCH вік другого студента ===
+PATCH http://127.0.0.1:5000/students/5
+  body: {"age": 23}
+  status: 200
+{
+  "age": 23,
+  "first_name": "Ігор",
+  "id": 5,
+  "last_name": "Бондар"
+}
+
+
+=== 5. GET другого студента ===
+GET http://127.0.0.1:5000/students/5
+  status: 200
+{
+  "age": 23,
+  "first_name": "Ігор",
+  "id": 5,
+  "last_name": "Бондар"
+}
+
+
+=== 6. PUT третього студента ===
+PUT http://127.0.0.1:5000/students/6
+  body: {"first_name": "Марія-Анна", "last_name": "Шевченко", "age": 20}
+  status: 200
+{
+  "age": 20,
+  "first_name": "Марія-Анна",
+  "id": 6,
+  "last_name": "Шевченко"
+}
+
+
+=== 7. GET третього студента ===
+GET http://127.0.0.1:5000/students/6
+  status: 200
+{
+  "age": 20,
+  "first_name": "Марія-Анна",
+  "id": 6,
+  "last_name": "Шевченко"
+}
+
+
+=== 8. GET усіх ===
+GET http://127.0.0.1:5000/students
+  status: 200
+[
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 2,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 3,
+    "last_name": "Шевченко"
+  },
+  {
+    "age": 20,
+    "first_name": "Олена",
+    "id": 4,
+    "last_name": "Коваленко"
+  },
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 5,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 6,
+    "last_name": "Шевченко"
+  }
+]
+
+
+=== 9. DELETE першого студента ===
+DELETE http://127.0.0.1:5000/students/4
+  status: 200
+{
+  "message": "Студента з id=4 успішно видалено."
+}
+
+
+=== 10. GET усіх після видалення ===
+GET http://127.0.0.1:5000/students
+  status: 200
+[
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 2,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 3,
+    "last_name": "Шевченко"
+  },
+  {
+    "age": 23,
+    "first_name": "Ігор",
+    "id": 5,
+    "last_name": "Бондар"
+  },
+  {
+    "age": 20,
+    "first_name": "Марія-Анна",
+    "id": 6,
+    "last_name": "Шевченко"
+  }
+]
+
+
