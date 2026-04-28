@@ -1,0 +1,328 @@
+# frozen_string_literal: true
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "local-ubuntu2204"
+  config.vm.box_url = "file:///C:/vagrant_boxes/generic-ubuntu2204-virtualbox.box"
+  config.vm.box_check_update = false
+
+  # The default synced folder points to a Windows path with non-ASCII symbols.
+  # Disabling it keeps Vagrant/VirtualBox away from the problematic user path.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  if Vagrant.has_plugin?("vagrant-vbguest")
+    config.vbguest.auto_update = false
+  end
+
+  controller_ip = "192.168.56.21"
+  worker_ip = "192.168.56.22"
+
+  dockerhub_user = ENV.fetch("DOCKERHUB_USERNAME", "")
+  dockerhub_pass = ENV.fetch("DOCKERHUB_PASSWORD", "")
+  jenkins_admin_user = ENV.fetch("JENKINS_ADMIN_USER", "admin")
+  jenkins_admin_pass = ENV.fetch("JENKINS_ADMIN_PASSWORD", "admin123")
+
+  config.vm.define "jenkins-worker" do |worker|
+    worker.vm.hostname = "jenkins-worker"
+    worker.vm.network "private_network", ip: worker_ip
+
+    worker.vm.provider "virtualbox" do |vb|
+      vb.name = "step2-jenkins-worker"
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.customize ["setproperty", "machinefolder", "C:/vbox"]
+    end
+
+    worker.vm.provision "shell", inline: <<-'SHELL'
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=a
+
+        apt-get update
+        apt-get install -y ca-certificates curl gnupg lsb-release openssh-server openjdk-17-jre git systemd-timesyncd
+        timedatectl set-ntp true
+        systemctl enable --now systemd-timesyncd
+
+        install -m 0755 -d /etc/apt/keyrings
+      if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      fi
+
+      echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+        $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable --now docker ssh
+
+      if ! id jenkins >/dev/null 2>&1; then
+        useradd -m -s /bin/bash jenkins
+      fi
+      echo "jenkins:jenkins" | chpasswd
+      usermod -aG docker jenkins
+      mkdir -p /home/jenkins/agent
+      chown -R jenkins:jenkins /home/jenkins/agent
+
+      sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+      systemctl restart ssh
+    SHELL
+  end
+
+  config.vm.define "jenkins-controller" do |controller|
+    controller.vm.hostname = "jenkins-controller"
+    controller.vm.network "private_network", ip: controller_ip
+    controller.vm.network "forwarded_port", guest: 8080, host: 8080, auto_correct: true
+
+    controller.vm.provider "virtualbox" do |vb|
+      vb.name = "step2-jenkins-controller"
+      vb.memory = 3072
+      vb.cpus = 2
+      vb.customize ["setproperty", "machinefolder", "C:/vbox"]
+    end
+
+    controller.vm.provision "shell",
+      env: {
+        "CONTROLLER_IP" => controller_ip,
+        "WORKER_IP" => worker_ip,
+        "JENKINS_ADMIN_USER" => jenkins_admin_user,
+        "JENKINS_ADMIN_PASSWORD" => jenkins_admin_pass,
+        "DOCKERHUB_USERNAME" => dockerhub_user,
+        "DOCKERHUB_PASSWORD" => dockerhub_pass
+      },
+      inline: <<-'SHELL'
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=a
+
+        apt-get update
+        apt-get install -y ca-certificates curl gnupg lsb-release systemd-timesyncd
+        timedatectl set-ntp true
+        systemctl enable --now systemd-timesyncd
+
+        install -m 0755 -d /etc/apt/keyrings
+        if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          chmod a+r /etc/apt/keyrings/docker.gpg
+        fi
+
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+          > /etc/apt/sources.list.d/docker.list
+
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        systemctl enable --now docker
+        usermod -aG docker vagrant || true
+
+        mkdir -p /opt/jenkins/init.groovy.d
+
+        cat >/opt/jenkins/Dockerfile <<'EOF'
+FROM jenkins/jenkins:lts-jdk17
+USER root
+RUN apt-get update && apt-get install -y docker.io && rm -rf /var/lib/apt/lists/*
+USER jenkins
+RUN jenkins-plugin-cli --plugins workflow-aggregator git docker-workflow credentials-binding ssh-slaves
+EOF
+
+        cat >/opt/jenkins/init.groovy.d/01-basic-setup.groovy <<'EOF'
+import jenkins.model.Jenkins
+import hudson.security.HudsonPrivateSecurityRealm
+import hudson.security.FullControlOnceLoggedInAuthorizationStrategy
+import hudson.model.User
+import hudson.model.Node
+import hudson.slaves.DumbSlave
+import hudson.slaves.RetentionStrategy
+import hudson.plugins.sshslaves.SSHLauncher
+import hudson.plugins.sshslaves.verifiers.NonVerifyingKeyVerificationStrategy
+import jenkins.install.InstallState
+import org.jenkinsci.plugins.workflow.job.WorkflowJob
+import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+import com.cloudbees.plugins.credentials.CredentialsScope
+import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+import com.cloudbees.plugins.credentials.domains.Domain
+import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+
+def instance = Jenkins.get()
+
+def adminUser = System.getenv('JENKINS_ADMIN_USER') ?: 'admin'
+def adminPass = System.getenv('JENKINS_ADMIN_PASSWORD') ?: 'admin123'
+
+def realm
+if (instance.securityRealm instanceof HudsonPrivateSecurityRealm) {
+  realm = instance.securityRealm
+} else {
+  realm = new HudsonPrivateSecurityRealm(false)
+  instance.setSecurityRealm(realm)
+
+  def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+  strategy.setAllowAnonymousRead(false)
+  instance.setAuthorizationStrategy(strategy)
+}
+
+def adminAccount = User.getById(adminUser, false)
+if (adminAccount != null) {
+  adminAccount.delete()
+}
+realm.createAccount(adminUser, adminPass)
+
+instance.setInstallState(InstallState.INITIAL_SETUP_COMPLETED)
+instance.setCrumbIssuer(null)
+
+def store = SystemCredentialsProvider.getInstance().getStore()
+def existingIds = SystemCredentialsProvider.getInstance().getCredentials().collect { it.id }
+
+if (!existingIds.contains('jenkins-worker-ssh')) {
+  store.addCredentials(
+    Domain.global(),
+    new UsernamePasswordCredentialsImpl(
+      CredentialsScope.GLOBAL,
+      'jenkins-worker-ssh',
+      'SSH password for Jenkins worker VM',
+      'jenkins',
+      'jenkins'
+    )
+  )
+}
+
+def dockerUser = System.getenv('DOCKERHUB_USERNAME') ?: ''
+def dockerPass = System.getenv('DOCKERHUB_PASSWORD') ?: ''
+if (dockerUser.trim() && dockerPass.trim() && !existingIds.contains('dockerhub-creds')) {
+  store.addCredentials(
+    Domain.global(),
+    new UsernamePasswordCredentialsImpl(
+      CredentialsScope.GLOBAL,
+      'dockerhub-creds',
+      'Docker Hub credentials',
+      dockerUser,
+      dockerPass
+    )
+  )
+}
+
+def workerIp = System.getenv('WORKER_IP') ?: '192.168.56.22'
+if (instance.getNode('jenkins-worker') == null) {
+  def launcher = new SSHLauncher(
+    workerIp,
+    22,
+    'jenkins-worker-ssh',
+    null,
+    null,
+    null,
+    null,
+    60,
+    3,
+    15,
+    new NonVerifyingKeyVerificationStrategy()
+  )
+
+  def worker = new DumbSlave(
+    'jenkins-worker',
+    'Jenkins worker VM created by Vagrant',
+    '/home/jenkins/agent',
+    '1',
+    Node.Mode.NORMAL,
+    'worker docker linux',
+    launcher,
+    RetentionStrategy.INSTANCE,
+    []
+  )
+  instance.addNode(worker)
+}
+
+def pipelineScript = '''
+pipeline {
+  agent { label 'worker' }
+
+  environment {
+    REPO_URL = 'https://github.com/Charizmatik/node_js.git'
+    REPO_BRANCH = 'master'
+    IMAGE_NAME = 'node_js'
+  }
+
+  stages {
+    stage('Pull the code') {
+      steps {
+        git branch: env.REPO_BRANCH, url: env.REPO_URL
+      }
+    }
+
+    stage('Build Docker image') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+          sh """
+            docker build \\
+              -t ${DOCKERHUB_USER}/${IMAGE_NAME}:${BUILD_NUMBER} \\
+              -t ${DOCKERHUB_USER}/${IMAGE_NAME}:latest \\
+              .
+          """
+        }
+      }
+    }
+
+    stage('Run tests in Docker') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+          script {
+            try {
+              sh 'docker run --rm ${DOCKERHUB_USER}/${IMAGE_NAME}:${BUILD_NUMBER} test'
+            } catch (err) {
+              echo 'Tests failed'
+              throw err
+            }
+          }
+        }
+      }
+    }
+
+    stage('Push image to Docker Hub') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+          sh """
+            echo "${DOCKERHUB_PASS}" | docker login -u "${DOCKERHUB_USER}" --password-stdin
+            docker push ${DOCKERHUB_USER}/${IMAGE_NAME}:${BUILD_NUMBER}
+            docker push ${DOCKERHUB_USER}/${IMAGE_NAME}:latest
+          """
+        }
+      }
+    }
+  }
+}
+'''
+
+def job = instance.getItem('step-project-2-node-js')
+if (job == null) {
+  job = instance.createProject(WorkflowJob, 'step-project-2-node-js')
+}
+job.setDefinition(new CpsFlowDefinition(pipelineScript, true))
+job.save()
+
+instance.save()
+EOF
+
+        docker build -t local/jenkins-step2:lts /opt/jenkins
+
+        docker rm -f jenkins-controller >/dev/null 2>&1 || true
+        docker volume create jenkins_home >/dev/null
+        docker run -d \
+          --name jenkins-controller \
+          --restart unless-stopped \
+          -p 8080:8080 \
+          -p 50000:50000 \
+          -e JENKINS_ADMIN_USER="$JENKINS_ADMIN_USER" \
+          -e JENKINS_ADMIN_PASSWORD="$JENKINS_ADMIN_PASSWORD" \
+          -e DOCKERHUB_USERNAME="$DOCKERHUB_USERNAME" \
+          -e DOCKERHUB_PASSWORD="$DOCKERHUB_PASSWORD" \
+          -e WORKER_IP="$WORKER_IP" \
+          -e JAVA_OPTS="-Djenkins.install.runSetupWizard=false" \
+          -v jenkins_home:/var/jenkins_home \
+          -v /opt/jenkins/init.groovy.d:/var/jenkins_home/init.groovy.d:ro \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          local/jenkins-step2:lts
+      SHELL
+  end
+
+end
